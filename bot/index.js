@@ -9,9 +9,9 @@ const {
 const fetch = require("node-fetch");
 
 // ── Config ──────────────────────────────────────────────────────────────────────
-const DISCORD_TOKEN  = process.env.DISCORD_BOT_TOKEN;
-const SESSION_COOKIE = process.env.LOGGED_TG_SESSION_COOKIE;
-const PREFIX         = "!";
+const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const AUTH_TOKEN    = process.env.AUTH_TOKEN;
+const PREFIX        = "!";
 
 const SESSION_URL = "https://logged.tg/api/session";
 const API_BASE    = "https://api.injuries.to";
@@ -19,11 +19,11 @@ const API_BASE    = "https://api.injuries.to";
 // ── Auth: exchange session cookie for x-id / x-token ───────────────────────────
 
 async function getAuthTokens() {
-  if (!SESSION_COOKIE) throw new Error("LOGGED_TG_SESSION_COOKIE is not set.");
+  if (!AUTH_TOKEN) throw new Error("AUTH_TOKEN is not set.");
 
   const res = await fetch(SESSION_URL, {
     headers: {
-      Cookie:       SESSION_COOKIE,
+      Cookie:       `AUTH_TOKEN=${AUTH_TOKEN}`,
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
       Referer:      "https://logged.tg/dashboard",
       Accept:       "application/json",
@@ -167,7 +167,7 @@ client.on("messageCreate", async (message) => {
             .setColor(0xed4245)
             .setTitle("Failed to fetch stats")
             .setDescription(
-              `Could not reach logged.tg. The session cookie may be expired.\n\n\`\`\`${err.message.slice(0, 300)}\`\`\``
+              `Could not reach logged.tg. The AUTH_TOKEN may be expired.\n\n\`\`\`${err.message.slice(0, 300)}\`\`\``
             )
             .setTimestamp(),
         ],
@@ -183,8 +183,8 @@ if (!DISCORD_TOKEN) {
   process.exit(1);
 }
 
-if (!SESSION_COOKIE) {
-  console.error("[logged.tg bot] LOGGED_TG_SESSION_COOKIE is not set.");
+if (!AUTH_TOKEN) {
+  console.error("[logged.tg bot] AUTH_TOKEN is not set.");
   process.exit(1);
 }
 
