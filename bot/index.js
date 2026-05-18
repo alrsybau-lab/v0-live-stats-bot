@@ -1,22 +1,22 @@
-require('dotenv').config({ path: require('path').join(__dirname, '../.env.local') });
+require("dotenv").config({ path: require("path").join(__dirname, "../.env.local") });
 
 const {
   Client,
   GatewayIntentBits,
   EmbedBuilder,
   ActivityType,
-} = require('discord.js');
-const fetch = require('node-fetch');
+} = require("discord.js");
+const fetch = require("node-fetch");
 
 // ── Config ─────────────────────────────────────────────────────────────────────
-const DISCORD_TOKEN   = process.env.DISCORD_BOT_TOKEN;
-const LOGGED_SESSION  = process.env.LOGGED_TG_SESSION_COOKIE; // full cookie string
-const STATS_CHANNEL   = process.env.STATS_CHANNEL_ID || null;  // optional channel lock
-const PREFIX          = '!';
-const API_BASE        = 'https://api.injuries.to';
-const SESSION_URL     = 'https://logged.tg/api/session';
+const DISCORD_TOKEN  = process.env.DISCORD_BOT_TOKEN;
+const LOGGED_SESSION = process.env.LOGGED_TG_SESSION_COOKIE; // full cookie string from browser
+const STATS_CHANNEL  = process.env.STATS_CHANNEL_ID || null;  // optional channel lock
+const PREFIX         = "!";
+const API_BASE       = "https://api.injuries.to";
+const SESSION_URL    = "https://logged.tg/api/session";
 
-// ── Discord client ──────────────────────────────────────────────────────────────
+// ── Discord client ─────────────────────────────────────────────────────────────
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -25,20 +25,20 @@ const client = new Client({
   ],
 });
 
-// ── Helpers ─────────────────────────────────────────────────────────────────────
+// ── Auth helpers ───────────────────────────────────────────────────────────────
 
 /**
- * Fetch the logged.tg session to get Auth.Id and Auth.Token.
- * Returns { id, token, userSettings } or throws on failure.
+ * Fetch the logged.tg session to extract Auth.Id and Auth.Token.
+ * These are used as x-id / x-token headers on the injuries.to API.
  */
 async function getLoggedSession() {
   const res = await fetch(SESSION_URL, {
-    method: 'GET',
+    method: "GET",
     headers: {
       Cookie: LOGGED_SESSION,
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36',
-      Referer: 'https://logged.tg/dashboard',
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+      Referer: "https://logged.tg/dashboard",
     },
   });
 
@@ -48,293 +48,286 @@ async function getLoggedSession() {
 
   const data = await res.json();
 
-  // Session shape: { Auth: [Id, Token, ...], userSettings: { userName, ... }, ... }
-  const authArr =
-    data?.Auth ||
-    data?.userSettings?.Auth ||
-    data?.Cookies?.Security; // fallback
+  // Session shape: { Auth: { Id, Token } } or { Auth: [Id, Token] }
+  const authObj = data?.Auth ?? data?.userSettings?.Auth ?? null;
 
-  if (!authArr) {
-    throw new Error('Could not extract Auth from session response');
+  if (!authObj) {
+    throw new Error(
+      "Auth tokens not found in session response. " +
+        "Your LOGGED_TG_SESSION_COOKIE may be expired — grab a fresh one from your browser."
+    );
   }
 
-  const id    = Array.isArray(authArr) ? authArr[0] : authArr.Id;
-  const token = Array.isArray(authArr) ? authArr[1] : authArr.Token;
+  const id    = Array.isArray(authObj) ? authObj[0] : (authObj.Id    ?? authObj.id);
+  const token = Array.isArray(authObj) ? authObj[1] : (authObj.Token ?? authObj.token);
+
+  if (!id || !token) {
+    throw new Error("Auth.Id or Auth.Token missing in session payload.");
+  }
 
   return {
-    id:    String(id),
+    id:   String(id),
     token: String(token),
-    user:  data?.userSettings || data?.user || {},
-    raw:   data,
+    user: data?.userSettings ?? data?.user ?? {},
+    raw:  data,
   };
 }
 
 /**
- * Call the injuries.to API with x-id / x-token auth headers.
- * path – relative path, e.g. '/api/auth'
+ * GET request to the injuries.to API with auth headers.
  */
-async function apiRequest(path, session) {
-  const url = `${API_BASE}${path.startsWith('/') ? path : '/' + path}`;
+async function apiGet(path, session) {
+  const url = `${API_BASE}${path}`;
   const res  = await fetch(url, {
-    method: 'GET',
+    method: "GET",
     headers: {
-      'x-id':           session.id,
-      'x-token':        session.token,
-      'content-type':   'application/json; charset=utf-8',
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36',
-      Origin:  'https://logged.tg',
-      Referer: 'https://logged.tg/dashboard',
+      "x-id":          session.id,
+      "x-token":       session.token,
+      "content-type":  "application/json; charset=utf-8",
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+      Origin:  "https://logged.tg",
+      Referer: "https://logged.tg/dashboard",
     },
   });
 
   const text = await res.text();
-
   let json;
-  try { json = JSON.parse(text); } catch { json = { raw: text }; }
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = { raw: text };
+  }
 
   if (!res.ok) {
-    throw new Error(`API ${path} returned ${res.status}: ${JSON.stringify(json)}`);
+    throw new Error(`API ${path} → ${res.status}: ${JSON.stringify(json).slice(0, 200)}`);
   }
 
   return json;
 }
 
-/**
- * Pull all dashboard stats for the authenticated user.
- * Returns a normalised stats object.
- */
+// ── Stats fetcher ──────────────────────────────────────────────────────────────
+
 async function fetchStats() {
   const session = await getLoggedSession();
 
-  // The dashboard data lives at /api/auth on the backend
-  // (from the schema: omniUser contains Totals, Dates, Collectibles, etc.)
-  const data = await apiRequest('/api/auth', session);
+  // Primary endpoint that holds the full omni-user dashboard payload
+  const data = await apiGet("/api/auth", session);
 
-  // ── Normalise the response ────────────────────────────────────────────────
-  const totals      = data?.omniData?.Main?.Data?.Totals   || data?.Totals   || {};
-  const profile     = data?.omniData?.Profile?.Header       || {};
-  const collectibles= data?.omniData?.Main?.Data?.Collectibles || data?.Collectibles || {};
-  const billing     = data?.omniData?.Main?.Data?.Billing   || data?.Billing  || {};
-  const groups      = data?.omniData?.Main?.Data?.Groups    || data?.Groups   || {};
-  const cookies     = data?.omniData?.Main?.Data?.Cookies   || data?.Cookies  || {};
-  const settings    = data?.omniData?.Main?.Data?.Settings  || {};
-  const avatar      = data?.userAvatar || data?.omniData?.userAvatar || null;
+  // Dig through the response shape (built from the site's JS schema)
+  const mainData    = data?.omniData?.Main?.Data   ?? data ?? {};
+  const profile     = data?.omniData?.Profile?.Header ?? {};
+  const totals      = mainData?.Totals      ?? {};
+  const collectibles= mainData?.Collectibles ?? {};
+  const billing     = mainData?.Billing      ?? {};
+  const groups      = mainData?.Groups       ?? {};
+  const cookies     = mainData?.Cookies      ?? {};
+
   const userName    = data?.userSettings?.userName
-                      || profile?.Username
-                      || session.user?.userName
-                      || 'Unknown';
+                      ?? profile?.Username
+                      ?? session.user?.userName
+                      ?? "Unknown";
   const displayName = data?.userSettings?.displayName
-                      || profile?.DisplayName
-                      || userName;
-  const isPremium   = data?.userSettings?.IsPremium
-                      || profile?.IsPremium
-                      || false;
+                      ?? profile?.DisplayName
+                      ?? userName;
+  const isPremium   = data?.userSettings?.IsPremium  ?? profile?.IsPremium ?? false;
+  const avatar      = data?.userAvatar ?? null;
 
   return {
     userName,
     displayName,
     isPremium,
     avatar,
-    // Core stats
-    visits:   totals.Visits   ?? 0,
-    accounts: totals.Accounts ?? 0,
-    summary:  totals.Summary  ?? 0,   // Robux summary value
-    rap:      totals.Rap      ?? 0,
-    balance:  totals.Balance  ?? 0,
+    // Hit / account stats
+    visits:       totals.Visits   ?? 0,
+    accounts:     totals.Accounts ?? 0,
+    summary:      totals.Summary  ?? 0,
+    rap:          totals.Rap      ?? 0,
+    balance:      totals.Balance  ?? 0,
     // Collectibles
-    rapItems:   collectibles?.Limiteds?.Rap          ?? 0,
-    hasKorblox: collectibles?.Korblox                ?? false,
-    hasHeadless:collectibles?.Headless               ?? false,
+    rapItems:    collectibles?.Limiteds?.Rap ?? 0,
+    hasKorblox:  collectibles?.Korblox      ?? false,
+    hasHeadless: collectibles?.Headless     ?? false,
     // Billing
-    subStatus:  billing?.Subscription?.Has           ?? false,
-    subExpires: billing?.Subscription?.Expires       ?? null,
-    billingTotal: billing?.Total                     ?? 0,
-    credit:     billing?.Credit?.Balance             ?? 0,
+    subActive:    billing?.Subscription?.Has     ?? false,
+    subExpires:   billing?.Subscription?.Expires ?? null,
+    billingTotal: billing?.Total                 ?? 0,
+    credit:       billing?.Credit?.Balance       ?? 0,
     // Groups
-    groupsOwned:  (groups?.Owned?.length)            ?? 0,
-    groupBalance: groups?.Balance                    ?? 0,
-    groupPending: groups?.Pending                    ?? 0,
-    // Cookie security
-    cookieSecurity: cookies?.Security ? '✅ Valid' : '❌ None',
-    // Site info
-    siteId:   settings?.siteId   || 'N/A',
-    siteCode: settings?.siteCode || 'N/A',
-    raw: data,
+    groupsOwned:  Array.isArray(groups?.Owned) ? groups.Owned.length : (groups?.Owned ?? 0),
+    groupBalance: groups?.Balance ?? 0,
+    groupPending: groups?.Pending ?? 0,
+    // Cookie health
+    cookieStatus: cookies?.Security ? "Valid" : "None",
   };
 }
 
-// ── Format helpers ────────────────────────────────────────────────────────────
+// ── Format helpers ─────────────────────────────────────────────────────────────
 
 function fmt(n) {
-  if (n == null || n === 0) return '0';
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
-  if (n >= 1_000)     return (n / 1_000).toFixed(1)     + 'K';
-  return n.toLocaleString();
+  if (n == null) return "0";
+  const num = Number(n);
+  if (num >= 1_000_000) return (num / 1_000_000).toFixed(2) + "M";
+  if (num >= 1_000)     return (num / 1_000).toFixed(1)     + "K";
+  return num.toLocaleString("en-US");
 }
 
-function robux(n) { return `R$ ${fmt(n)}`; }
+function robux(n) {
+  return `R\$ ${fmt(n)}`;
+}
 
-// ── Build embed ───────────────────────────────────────────────────────────────
+function boolField(val) {
+  return val ? "> ✅  Yes" : "> ❌  No";
+}
+
+// ── Embed builder ──────────────────────────────────────────────────────────────
 
 function buildStatsEmbed(stats, requester) {
-  const now = new Date();
-
-  const color = stats.isPremium ? 0xf5a623 : 0x5865f2; // gold for premium, blurple otherwise
+  const color = stats.isPremium ? 0xf5a623 : 0x5865f2;
 
   const embed = new EmbedBuilder()
     .setColor(color)
-    .setTitle(`📊  ${stats.displayName}'s Stats  |  logged.tg`)
-    .setURL('https://logged.tg/dashboard')
+    .setTitle(`${stats.displayName}  |  logged.tg Dashboard`)
+    .setURL("https://logged.tg/dashboard")
     .setDescription(
-      `> Account \`${stats.userName}\`${stats.isPremium ? '  ⭐ **Premium**' : ''}`,
+      `> Username: \`${stats.userName}\`` +
+      (stats.isPremium ? "  —  ⭐ **Premium**" : "")
     )
     .setThumbnail(
-      stats.avatar && stats.avatar.startsWith('http')
+      stats.avatar && stats.avatar.startsWith("http")
         ? stats.avatar
-        : 'https://logged.tg/favicon.ico',
+        : "https://logged.tg/favicon.ico"
     )
 
-    // ── Core hit stats ──────────────────────────────────────────────────────
+    // ─── Row 1: Core hit counters ──────────────────────────────────────────
     .addFields(
       {
-        name: '🎯  Total Hits',
+        name: "Total Hits",
         value: `\`\`\`\n${fmt(stats.accounts)}\`\`\``,
         inline: true,
       },
       {
-        name: '🌐  Site Visits',
+        name: "Site Visits",
         value: `\`\`\`\n${fmt(stats.visits)}\`\`\``,
         inline: true,
       },
       {
-        name: '💰  Total Summary',
+        name: "Summary",
         value: `\`\`\`\n${robux(stats.summary)}\`\`\``,
         inline: true,
-      },
+      }
     )
 
-    // ── Robux / economy ─────────────────────────────────────────────────────
+    // ─── Row 2: Economy ───────────────────────────────────────────────────
     .addFields(
       {
-        name: '💎  Total RAP',
+        name: "Total RAP",
         value: `\`\`\`\n${robux(stats.rap)}\`\`\``,
         inline: true,
       },
       {
-        name: '💵  Balance',
+        name: "Balance",
         value: `\`\`\`\n${robux(stats.balance)}\`\`\``,
         inline: true,
       },
       {
-        name: '🏆  Limiteds RAP',
+        name: "Limiteds RAP",
         value: `\`\`\`\n${robux(stats.rapItems)}\`\`\``,
         inline: true,
-      },
+      }
     )
 
-    // ── Rare items ──────────────────────────────────────────────────────────
+    // ─── Rare items ────────────────────────────────────────────────────────
     .addFields({
-      name: '🦴  Rare Items',
-      value: [
-        `• Korblox:   ${stats.hasKorblox  ? '✅ Yes' : '❌ No'}`,
-        `• Headless:  ${stats.hasHeadless ? '✅ Yes' : '❌ No'}`,
-      ].join('\n'),
+      name: "Rare Items",
+      value:
+        `Korblox:   ${stats.hasKorblox  ? "✅  Yes" : "❌  No"}\n` +
+        `Headless:  ${stats.hasHeadless ? "✅  Yes" : "❌  No"}`,
       inline: false,
     })
 
-    // ── Billing ─────────────────────────────────────────────────────────────
+    // ─── Billing ───────────────────────────────────────────────────────────
     .addFields(
       {
-        name: '🔔  Subscription',
-        value: [
-          `Active:   ${stats.subStatus ? '✅ Yes' : '❌ No'}`,
-          stats.subExpires ? `Expires: ${stats.subExpires}` : '',
-        ]
-          .filter(Boolean)
-          .join('\n'),
+        name: "Subscription",
+        value:
+          `Active:   ${stats.subActive ? "✅  Yes" : "❌  No"}\n` +
+          (stats.subExpires ? `Expires:  ${stats.subExpires}` : ""),
         inline: true,
       },
       {
-        name: '🧾  Billing',
-        value: [
-          `Total:   ${robux(stats.billingTotal)}`,
+        name: "Billing",
+        value:
+          `Total:   ${robux(stats.billingTotal)}\n` +
           `Credit:  ${robux(stats.credit)}`,
-        ].join('\n'),
         inline: true,
       },
-      { name: '\u200b', value: '\u200b', inline: true }, // spacer
+      { name: "\u200b", value: "\u200b", inline: true }
     )
 
-    // ── Groups ──────────────────────────────────────────────────────────────
+    // ─── Groups ────────────────────────────────────────────────────────────
     .addFields({
-      name: '👥  Groups',
-      value: [
-        `• Owned:    **${stats.groupsOwned}**`,
-        `• Balance:  ${robux(stats.groupBalance)}`,
-        `• Pending:  ${robux(stats.groupPending)}`,
-      ].join('\n'),
-      inline: false,
-    })
-
-    // ── Session / cookie ────────────────────────────────────────────────────
-    .addFields({
-      name: '🍪  Cookie Status',
-      value: stats.cookieSecurity,
+      name: "Groups",
+      value:
+        `Owned:    **${stats.groupsOwned}**\n` +
+        `Balance:  ${robux(stats.groupBalance)}\n` +
+        `Pending:  ${robux(stats.groupPending)}`,
       inline: true,
     })
 
-    // ── Footer ──────────────────────────────────────────────────────────────
+    // ─── Cookie ────────────────────────────────────────────────────────────
+    .addFields({
+      name: "Cookie Status",
+      value: stats.cookieStatus === "Valid" ? "✅  Valid" : "❌  None",
+      inline: true,
+    })
+
     .setFooter({
       text: `Requested by ${requester.tag}  •  logged.tg`,
       iconURL: requester.displayAvatarURL({ dynamic: true }),
     })
-    .setTimestamp(now);
+    .setTimestamp();
 
   return embed;
 }
 
-// ── Event: ready ──────────────────────────────────────────────────────────────
+// ── Events ─────────────────────────────────────────────────────────────────────
 
-client.once('ready', () => {
-  console.log(`[logged.tg bot] Logged in as ${client.user.tag}`);
-  client.user.setActivity('logged.tg/dashboard', { type: ActivityType.Watching });
+client.once("ready", () => {
+  console.log(`[logged.tg bot] Online as ${client.user.tag}`);
+  client.user.setActivity("logged.tg/dashboard", { type: ActivityType.Watching });
 });
 
-// ── Event: messageCreate ──────────────────────────────────────────────────────
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+  if (!message.guild)     return;
 
-client.on('messageCreate', async (message) => {
-  // Ignore bots and DMs
-  if (message.author.bot)    return;
-  if (!message.guild)        return;
-
-  const content = message.content.trim().toLowerCase();
-
+  const content = message.content.trim();
   if (!content.startsWith(PREFIX)) return;
 
-  const command = content.slice(PREFIX.length).split(/\s+/)[0];
+  const command = content.slice(PREFIX.length).trim().split(/\s+/)[0].toLowerCase();
 
-  // ── !stats ──────────────────────────────────────────────────────────────
-  if (command === 'stats') {
-    // Optional: restrict to a specific channel
+  // ── !stats ─────────────────────────────────────────────────────────────────
+  if (command === "stats") {
+    // Optional: lock to a specific channel
     if (STATS_CHANNEL && message.channel.id !== STATS_CHANNEL) return;
 
-    const typing = await message.channel.sendTyping();
+    await message.channel.sendTyping();
 
     try {
       const stats = await fetchStats();
       const embed = buildStatsEmbed(stats, message.author);
       await message.reply({ embeds: [embed] });
     } catch (err) {
-      console.error('[logged.tg bot] Error fetching stats:', err.message);
+      console.error("[logged.tg bot] Stats error:", err.message);
       await message.reply({
         embeds: [
           new EmbedBuilder()
             .setColor(0xed4245)
-            .setTitle('❌  Failed to fetch stats')
+            .setTitle("Failed to fetch stats")
             .setDescription(
-              `\`\`\`\n${err.message.slice(0, 300)}\`\`\`\n` +
-              'Make sure your `LOGGED_TG_SESSION_COOKIE` is valid and not expired.',
+              `\`\`\`\n${err.message.slice(0, 400)}\`\`\`\n` +
+              "Make sure your `LOGGED_TG_SESSION_COOKIE` is up to date."
             )
             .setTimestamp(),
         ],
@@ -344,16 +337,16 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // ── !help ────────────────────────────────────────────────────────────────
-  if (command === 'help') {
+  // ── !help ──────────────────────────────────────────────────────────────────
+  if (command === "help") {
     await message.reply({
       embeds: [
         new EmbedBuilder()
           .setColor(0x5865f2)
-          .setTitle('📖  logged.tg Bot — Commands')
+          .setTitle("logged.tg Bot — Commands")
           .addFields(
-            { name: '`!stats`', value: 'Fetch live stats from your logged.tg dashboard', inline: false },
-            { name: '`!help`',  value: 'Show this help message', inline: false },
+            { name: "`!stats`", value: "Fetch live stats from your logged.tg dashboard.", inline: false },
+            { name: "`!help`",  value: "Show this help message.",                          inline: false }
           )
           .setTimestamp(),
       ],
@@ -361,14 +354,14 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// ── Start ─────────────────────────────────────────────────────────────────────
+// ── Start ──────────────────────────────────────────────────────────────────────
 
 if (!DISCORD_TOKEN) {
-  console.error('[logged.tg bot] Missing DISCORD_BOT_TOKEN in environment');
+  console.error("[logged.tg bot] DISCORD_BOT_TOKEN is not set in .env.local");
   process.exit(1);
 }
 if (!LOGGED_SESSION) {
-  console.error('[logged.tg bot] Missing LOGGED_TG_SESSION_COOKIE in environment');
+  console.error("[logged.tg bot] LOGGED_TG_SESSION_COOKIE is not set in .env.local");
   process.exit(1);
 }
 
