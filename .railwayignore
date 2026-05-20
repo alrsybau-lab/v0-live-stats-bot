@@ -1,0 +1,7 @@
+# Skip Next.js app files — Railway only runs the bot
+.next/
+app/
+components/
+public/
+*.test.*
+*.spec.*
