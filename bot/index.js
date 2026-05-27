@@ -113,7 +113,7 @@ async function autoPurgeChannels() {
   ];
 
   const startTime = Date.now();
-  let totalDeleted = 0;
+  const channelDeletionCounts = {}; // Track deleted count per channel
 
   try {
     for (const channelId of channelIds) {
@@ -122,6 +122,7 @@ async function autoPurgeChannels() {
         const channel = await client.channels.fetch(channelId);
         if (!channel || !channel.isTextBased()) {
           console.log(`[v0] Channel ${channelId} is not text-based or not found`);
+          channelDeletionCounts[channelId] = 0;
           continue;
         }
 
@@ -153,39 +154,42 @@ async function autoPurgeChannels() {
           try {
             await channel.bulkDelete(batch, true);
             deletedInChannel += batch.length;
-            totalDeleted += batch.length;
             console.log(`[v0] Bulk deleted ${batch.length} messages from ${channelId}. Total: ${deletedInChannel}/${allMessages.length}`);
           } catch (err) {
             console.log(`[v0] Error bulk deleting batch in ${channelId}:`, err.message);
           }
         }
         
+        channelDeletionCounts[channelId] = deletedInChannel;
         console.log(`[v0] Finished purging ${channelId}. Deleted ${deletedInChannel} messages`);
       } catch (err) {
         console.log(`[v0] Error purging channel ${channelId}:`, err.message);
+        channelDeletionCounts[channelId] = 0;
       }
     }
 
     const endTime = Date.now();
     const elapsedSeconds = ((endTime - startTime) / 1000).toFixed(1);
 
-    console.log(`[v0] Auto-purge completed. Total deleted: ${totalDeleted} messages in ${elapsedSeconds}s`);
+    console.log(`[v0] Auto-purge completed. Total deleted: ${Object.values(channelDeletionCounts).reduce((a, b) => a + b, 0)} messages in ${elapsedSeconds}s`);
 
-    const purgeEmbed = new EmbedBuilder()
-      .setDescription(`**─── <a:emoji_8:1506236357775720548> \`ɪɴꜱᴀɴɪᴛʏ | ᴘᴜʀɢᴇ\` <a:emoji_8:1506236357775720548> ───**`)
-      .setImage("https://image2url.com/r2/default/gifs/1768488617981-bdc4c780-144f-4a40-8906-ddf01eadb705.gif")
-      .setFooter({
-        text: `Auto purge finished • Deleted ${totalDeleted} messages in ${elapsedSeconds}s`,
-        iconURL: "https://image2url.com/r2/default/gifs/1768488617981-bdc4c780-144f-4a40-8906-ddf01eadb705.gif",
-      });
-
-    // Send the purge result embed to all three channels so it persists in each
+    // Send individual purge result embed to each channel with its own deletion count
     for (const channelId of channelIds) {
       try {
         const channel = await client.channels.fetch(channelId);
         if (channel && channel.isTextBased()) {
+          const deletedCount = channelDeletionCounts[channelId] || 0;
+          
+          const purgeEmbed = new EmbedBuilder()
+            .setDescription(`**─── <a:emoji_8:1506236357775720548> \`ɪɴꜱᴀɴɪᴛʏ | ᴘᴜʀɢᴇ\` <a:emoji_8:1506236357775720548> ───**`)
+            .setImage("https://image2url.com/r2/default/gifs/1768488617981-bdc4c780-144f-4a40-8906-ddf01eadb705.gif")
+            .setFooter({
+              text: `Auto purge finished • Deleted ${deletedCount} messages in ${elapsedSeconds}s`,
+              iconURL: "https://image2url.com/r2/default/gifs/1768488617981-bdc4c780-144f-4a40-8906-ddf01eadb705.gif",
+            });
+          
           await channel.send({ embeds: [purgeEmbed] });
-          console.log(`[v0] Sent purge result to channel ${channelId}`);
+          console.log(`[v0] Sent purge result to channel ${channelId} (deleted ${deletedCount} messages)`);
         }
       } catch (err) {
         console.log(`[v0] Could not send purge result to ${channelId}:`, err.message);
@@ -200,9 +204,10 @@ client.once("ready", async () => {
   console.log(`[bot] Online as ${client.user.tag}`);
   client.user.setActivity("!hyperlink", { type: ActivityType.Listening });
 
-  // Run auto-purge every 24 hours (86400000 milliseconds)
-  setInterval(autoPurgeChannels, 86400000);
+  // Run auto-purge every 6 hours (21600000 milliseconds)
+  setInterval(autoPurgeChannels, 21600000);
   // Run immediately on startup
+  console.log("[v0] Auto-purge scheduled every 6 hours");
   autoPurgeChannels();
 
   // Register /announce slash command globally
@@ -757,11 +762,8 @@ client.on("interactionCreate", async (interaction) => {
 
       // Build result embed — no color so there is no left-bar tint
       const resultEmbed = new EmbedBuilder()
-        .setDescription(
-          "**─── <a:emoji_8:1506236357775720548> `ɪɴꜱᴀɴɪᴛʏ   | ʜʏᴘᴇʀʟɪɴᴋ` <a:emoji_8:1506236357775720548> ───\n\n" +
-          "<a:emoji_13:1508646379751342130> ᴜꜱᴇ ᴛʜɪꜱ ᴛᴏᴏʟ ᴛᴏ ɢᴇɴᴇʀᴀᴛᴇ ʜʏᴘᴇʀʟɪɴᴋꜱ ᴛʜᴀᴛ ʙʏᴘᴀꜱꜱ ᴅɪꜱᴄᴏʀᴅ ᴡᴀʀɴɪɴɢꜱ\n\n" +
-          "<:emoji_14:1508646444607864872>  ʙᴇꜱᴛ ʜʏᴘᴇʀʟɪɴᴋ ᴏꜰ ᴀʟʟ ᴛɪᴍᴇ**"
-        )
+        .setTitle(`<:emoji_10:1506872243979030598> Here's your hyperlink ready to use — copy it below and paste it wherever you need.`)
+        .setDescription(`\`${fmt}\``)
         .setFooter({
           text: `Requested by ${interaction.user.username}`,
           iconURL: interaction.user.displayAvatarURL({ dynamic: true }),
